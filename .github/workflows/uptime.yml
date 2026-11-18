@@ -1,0 +1,88 @@
+name: Uptime Supabase CRM
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_alerta:
+        description: "Trimite o notificare de test"
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  sonda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Starea rularii anterioare
+        id: prev
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          c=$(gh api "repos/${{ github.repository }}/actions/workflows/uptime.yml/runs?status=completed&per_page=5" \
+                --jq '[.workflow_runs[] | select(.id != ${{ github.run_id }}) | .conclusion][0] // "success"' 2>/dev/null || echo success)
+          echo "conclusion=$c" >> "$GITHUB_OUTPUT"; echo "rularea anterioara: $c"
+
+      - name: Verificare Auth + REST (3 incercari)
+        id: sonda
+        env:
+          URL: ${{ secrets.SUPABASE_URL }}
+          KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          ok=0; det=""
+          for i in 1 2 3; do
+            a=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 -H "apikey: $KEY" "$URL/auth/v1/health")
+            r=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 -H "apikey: $KEY" -H "Authorization: Bearer $KEY" "$URL/rest/v1/leaduri_rto?select=id&limit=1")
+            det="auth=$a rest=$r"; echo "incercarea $i: $det"
+            if [ "$a" = "200" ] && [ "$r" = "200" ]; then ok=1; break; fi
+            [ $i -lt 3 ] && sleep 60
+          done
+          echo "detalii=$det" >> "$GITHUB_OUTPUT"
+          if [ $ok = 1 ]; then echo "stare=ok" >> "$GITHUB_OUTPUT"; else echo "stare=cazut" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Notificare la schimbarea starii
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+          EMAIL: ${{ secrets.NTFY_EMAIL }}
+          STARE: ${{ steps.sonda.outputs.stare }}
+          PREV: ${{ steps.prev.outputs.conclusion }}
+          DET: ${{ steps.sonda.outputs.detalii }}
+          TEST: ${{ inputs.test_alerta }}
+        run: |
+          trimite() { # $1 titlu, $2 text, $3 prioritate, $4 tag
+            curl -s --max-time 20 -H "Title: $1" -H "Priority: $3" -H "Tags: $4" -H "Email: $EMAIL" \
+                 -d "$2" "https://ntfy.sh/$TOPIC" > /dev/null && echo "notificare trimisa: $1"
+          }
+          ora=$(TZ=Europe/Bucharest date '+%d.%m %H:%M')
+          if [ "$TEST" = "true" ]; then trimite "Test alarma CRM" "Test $ora - sonda functioneaza ($DET)." default white_check_mark; fi
+          if [ "$STARE" = "cazut" ] && [ "$PREV" != "failure" ]; then
+            trimite "CRM Vibroblast: baza NU raspunde" "$ora - Supabase nu raspunde de ~5 minute ($DET). Verifica https://supabase.com/dashboard/project/cmuietqktktggwvxtqap" urgent rotating_light
+          fi
+          if [ "$STARE" = "ok" ] && [ "$PREV" = "failure" ]; then
+            trimite "CRM Vibroblast: baza si-a revenit" "$ora - Auth si REST raspund din nou ($DET)." default white_check_mark
+          fi
+
+      - name: Commit lunar (pastreaza programarea activa)
+        if: steps.sonda.outputs.stare == 'ok'
+        run: |
+          ultim=$(curl -s -H "Authorization: Bearer ${{ github.token }}" "https://api.github.com/repos/${{ github.repository }}/commits?per_page=1" | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['commit']['committer']['date'])")
+          vechi=$(( ( $(date +%s) - $(date -d "$ultim" +%s) ) / 86400 ))
+          echo "ultimul commit acum $vechi zile"
+          if [ $vechi -ge 30 ]; then
+            git clone -q --depth 1 "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" r && cd r
+            git -c user.name="uptime-bot" -c user.email="actions@users.noreply.github.com" commit -q --allow-empty -m "keepalive"
+            git push -q
+          fi
+
+      - name: Marcheaza rularea ca esuata cand baza e cazuta
+        if: steps.sonda.outputs.stare == 'cazut'
+        run: exit 1
