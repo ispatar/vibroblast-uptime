@@ -59,8 +59,8 @@ jobs:
           TEST: ${{ inputs.test_alerta }}
         run: |
           trimite() { # $1 titlu, $2 text, $3 prioritate, $4 tag
-            curl -s --max-time 20 -H "Title: $1" -H "Priority: $3" -H "Tags: $4" -H "Email: $EMAIL" \
-                 -d "$2" "https://ntfy.sh/$TOPIC" > /dev/null && echo "notificare trimisa: $1"
+            curl -fsS --max-time 20 -H "Title: $1" -H "Priority: $3" -H "Tags: $4" -H "Email: $EMAIL" \
+                 -d "$2" "https://ntfy.sh/$TOPIC" > /dev/null && echo "notificare trimisa: $1" || echo "::warning::ntfy a refuzat notificarea: $1"
           }
           ora=$(TZ=Europe/Bucharest date '+%d.%m %H:%M')
           if [ "$TEST" = "true" ]; then trimite "Test alarma CRM" "Test $ora - sonda functioneaza ($DET)." default white_check_mark; fi
